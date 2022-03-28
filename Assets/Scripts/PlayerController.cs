@@ -4,16 +4,17 @@ public class PlayerController : MonoBehaviour
 {
 
 	[SerializeField]
-	Transform playerInputSpace = default;
+	Transform playerInputSpace = default, ball = default;
 
 	[SerializeField, Range(0f, 100f)]
-	float maxSpeed = 10f, maxClimbSpeed = 4f;
+	float maxSpeed = 10f, maxClimbSpeed = 4f, maxSwimSpeed = 5f;
 
 	[SerializeField, Range(0f, 100f)]
-	float 
+	float
 		maxAcceleration = 10f,
 		maxAirAcceleration = 1f,
-		maxClimbAcceleration = 40f;
+		maxClimbAcceleration = 40f,
+		maxSwimAcceleration = 5f;
 
 	[SerializeField, Range(0f, 10f)]
 	float jumpHeight = 2f;
@@ -34,14 +35,38 @@ public class PlayerController : MonoBehaviour
 	float probeDistance = 1f;
 
 	[SerializeField]
-	LayerMask probeMask = -1, stairsMask = -1, climbMask = -1;
+	float submergenceOffset = 0.5f;
+
+	[SerializeField, Min(0.1f)]
+	float submergenceRange = 1f;
+
+	[SerializeField, Min(0f)]
+	float buoyancy = 1f;
+
+	[SerializeField, Range(0f, 10f)]
+	float waterDrag = 1f;
+
+	[SerializeField, Range(0.01f, 1f)]
+	float swimThreshold = 0.5f;
 
 	[SerializeField]
-	Material normalMaterial = default, climbingMaterial = default;
+	LayerMask probeMask = -1, stairsMask = -1, climbMask = -1, waterMask = 0;
+
+	[SerializeField]
+	Material normalMaterial = default, climbingMaterial = default, swimmingMaterial = default;
+
+	[SerializeField, Min(0.1f)]
+	float ballRadius = 0.5f;
+
+	[SerializeField, Min(0f)]
+	float ballAlignSpeed = 180f;
+
+	[SerializeField, Min(0f)]
+	float ballAirRotation = 0.5f, ballSwimRotation = 2f;
 
 	Rigidbody body, connectedBody, previousConnectedBody;
 
-	Vector2 playerInput;
+	Vector3 playerInput;
 
 	Vector3 velocity, connectionVelocity;
 
@@ -53,11 +78,19 @@ public class PlayerController : MonoBehaviour
 
 	Vector3 contactNormal, steepNormal, climbNormal, lastClimbNormal;
 
+	Vector3 lastContactNormal, lastSteepNormal, lastConnectionVelocity;
+
 	int groundContactCount, steepContactCount, climbContactCount;
 
 	bool OnGround => groundContactCount > 0;
 
 	bool OnSteep => steepContactCount > 0;
+
+	bool InWater => submergence > 0f;
+
+	bool Swimming => submergence >= swimThreshold;
+
+	float submergence;
 
 	bool Climbing => climbContactCount > 0 && stepsSinceLastJump > 2;
 
@@ -80,15 +113,16 @@ public class PlayerController : MonoBehaviour
 	{
 		body = GetComponent<Rigidbody>();
 		body.useGravity = false;
-		meshRenderer = GetComponent<MeshRenderer>();
+		meshRenderer = ball.GetComponent<MeshRenderer>();
 		OnValidate();
 	}
 
 	void Update()
 	{
 		playerInput.x = Input.GetAxis("Horizontal");
-		playerInput.y = Input.GetAxis("Vertical");
-		playerInput = Vector2.ClampMagnitude(playerInput, 1f);
+		playerInput.z = Input.GetAxis("Vertical");
+		playerInput.y = Swimming ? Input.GetAxis("UpDown") : 0f;
+		playerInput = Vector3.ClampMagnitude(playerInput, 1f);
 
 		if (playerInputSpace)
 		{
@@ -102,16 +136,106 @@ public class PlayerController : MonoBehaviour
 			forwardAxis = ProjectDirectionOnPlane(Vector3.forward, upAxis);
 		}
 
-		desiredJump |= Input.GetButtonDown("Jump");
-		desiresClimbing = Input.GetButton("Climb");
+        if (Swimming)
+        {
+			desiresClimbing = false;
+        }
+        else
+        {
+			desiredJump |= Input.GetButtonDown("Jump");
+			desiresClimbing = Input.GetButton("Climb");
+		}
 
-		meshRenderer.material = Climbing ? climbingMaterial : normalMaterial;
+		UpdateBall();
+	}
+
+	void UpdateBall()
+    {
+		Material ballMaterial = normalMaterial;
+		Vector3 rotationPlaneNormal = lastContactNormal;
+		float rotationFactor = 1f;
+        if (Climbing)
+        {
+			ballMaterial = climbingMaterial;
+        }
+        else if (Swimming)
+        {
+			ballMaterial = swimmingMaterial;
+			rotationFactor = ballSwimRotation;
+        }
+        else if (!OnGround)
+        {
+            if (OnSteep)
+            {
+				lastContactNormal = lastSteepNormal;
+            }
+            else
+            {
+				rotationFactor = ballAirRotation;
+            }
+        }
+		meshRenderer.material = ballMaterial;
+
+		Vector3 movement = (body.velocity - lastConnectionVelocity) * Time.deltaTime;
+		movement -= rotationPlaneNormal * Vector3.Dot(movement, rotationPlaneNormal);
+		float distance = movement.magnitude;
+		Quaternion rotation = ball.localRotation;
+		if (connectedBody && connectedBody == previousConnectedBody)
+		{
+			rotation = Quaternion.Euler(
+				connectedBody.angularVelocity * (Mathf.Rad2Deg * Time.deltaTime)
+			) * rotation;
+			if (distance < 0.001f)
+			{
+				ball.localRotation = rotation;
+				return;
+			}
+		}
+		else if (distance < 0.001f)
+		{
+			return;
+		}
+		float angle = distance * rotationFactor * (180f / Mathf.PI) / ballRadius;
+		Vector3 rotationAxis =
+			Vector3.Cross(rotationPlaneNormal, movement).normalized;
+		rotation = Quaternion.Euler(rotationAxis * angle) * rotation;
+        if (ballAlignSpeed > 0f)
+        {
+			rotation = AlignBallRotation(rotationAxis, rotation, distance);
+        }
+		ball.localRotation = rotation;
+    }
+
+	Quaternion AlignBallRotation(Vector3 rotationAxis, Quaternion rotation, float traveledDistance)
+	{
+		Vector3 ballAxis = ball.up;
+		float dot = Mathf.Clamp(Vector3.Dot(ballAxis, rotationAxis), -1f, 1f);
+		float angle = Mathf.Acos(dot) * Mathf.Rad2Deg;
+		float maxAngle = ballAlignSpeed * traveledDistance;
+
+		Quaternion newAlignment =
+			Quaternion.FromToRotation(ballAxis, rotationAxis) * rotation;
+		if (angle <= maxAngle)
+		{
+			return newAlignment;
+		}
+		else
+		{
+			return Quaternion.SlerpUnclamped(
+				rotation, newAlignment, maxAngle / angle
+			);
+		}
 	}
 
 	void FixedUpdate()
 	{
 		Vector3 gravity = CustomGravity.GetGravity(body.position, out upAxis);
 		UpdateState();
+
+        if (InWater)
+        {
+			velocity *= 1f - waterDrag * submergence * Time.deltaTime;
+        }
 		AdjustVelocity();
 
 		if (desiredJump)
@@ -125,6 +249,10 @@ public class PlayerController : MonoBehaviour
 			velocity -=
 				contactNormal * (maxClimbAcceleration * 0.9f * Time.deltaTime);
 		}
+        else if (InWater)
+        {
+			velocity += gravity * ((1f - buoyancy * submergence) * Time.deltaTime);
+        }
 		else if (OnGround && velocity.sqrMagnitude < 0.01f)
 		{
 			velocity +=
@@ -145,13 +273,52 @@ public class PlayerController : MonoBehaviour
 		ClearState();
 	}
 
+    private void OnTriggerEnter(Collider other)
+    {
+        if ((waterMask & (1 << other.gameObject.layer)) != 0)
+        {
+			EvaluateSubmergence(other);
+        }
+    }
+
+    private void OnTriggerStay(Collider other)
+    {
+        if ((waterMask & (1 << other.gameObject.layer)) != 0)
+        {
+			EvaluateSubmergence(other);
+        }
+    }
+
+	void EvaluateSubmergence(Collider collider)
+	{
+		if (Physics.Raycast(
+			body.position + upAxis * submergenceOffset,
+			-upAxis, out RaycastHit hit, submergenceRange + 1f,
+			waterMask, QueryTriggerInteraction.Collide
+			))
+		{
+			submergence = 1f - hit.distance / submergenceRange;
+		}
+		else
+		{
+			submergence = 1f;
+		}
+        if (Swimming)
+        {
+			connectedBody = collider.attachedRigidbody;
+        }
+	}
+
 	void ClearState()
 	{
+		lastContactNormal = contactNormal;
+		lastSteepNormal = steepNormal;
 		groundContactCount = steepContactCount = climbContactCount = 0;
 		contactNormal = steepNormal = climbNormal = Vector3.zero;
 		connectionVelocity = Vector3.zero;
 		previousConnectedBody = connectedBody;
 		connectedBody = null;
+		submergence = 0f;
 	}
 
 	void UpdateState()
@@ -160,7 +327,8 @@ public class PlayerController : MonoBehaviour
 		stepsSinceLastJump += 1;
 		velocity = body.velocity;
 		if (
-			CheckClimbing() || OnGround || SnapToGround() || CheckSteepContacts()
+			CheckClimbing() || CheckSwimming() ||
+			OnGround || SnapToGround() || CheckSteepContacts()
 		)
 		{
 			stepsSinceLastGrounded = 0;
@@ -222,6 +390,17 @@ public class PlayerController : MonoBehaviour
 		return false;
 	}
 
+	bool CheckSwimming()
+    {
+        if (Swimming)
+        {
+			groundContactCount = 0;
+			contactNormal = upAxis;
+			return true;
+        }
+		return false;
+    }
+
 	bool SnapToGround()
 	{
 		if (stepsSinceLastGrounded > 1 || stepsSinceLastJump <= 2)
@@ -235,7 +414,7 @@ public class PlayerController : MonoBehaviour
 		}
 		if (!Physics.Raycast(
 			body.position, -upAxis, out RaycastHit hit,
-			probeDistance, probeMask
+			probeDistance, probeMask, QueryTriggerInteraction.Ignore
 		))
 		{
 			return false;
@@ -257,6 +436,11 @@ public class PlayerController : MonoBehaviour
 		connectedBody = hit.rigidbody;
 		return true;
 	}
+
+	public void PreventSnapToGround()
+    {
+		stepsSinceLastJump = -1;
+    }
 
 	bool CheckSteepContacts()
 	{
@@ -286,6 +470,17 @@ public class PlayerController : MonoBehaviour
 			xAxis = Vector3.Cross(contactNormal, upAxis);
 			zAxis = upAxis;
 		}
+        else if (InWater)
+        {
+			float swimFactor = Mathf.Min(1f, submergence / swimThreshold);
+			acceleration = Mathf.LerpUnclamped(
+				OnGround ? maxAcceleration: maxAirAcceleration, 
+				maxSwimAcceleration, swimFactor
+				);
+			speed = Mathf.LerpUnclamped(maxSpeed, maxSwimSpeed, swimFactor);
+			xAxis = rightAxis;
+			zAxis = forwardAxis;
+        }
 		else
 		{
 			acceleration = OnGround ? maxAcceleration : maxAirAcceleration;
@@ -297,17 +492,23 @@ public class PlayerController : MonoBehaviour
 		zAxis = ProjectDirectionOnPlane(zAxis, contactNormal);
 
 		Vector3 relativeVelocity = velocity - connectionVelocity;
-		float currentX = Vector3.Dot(relativeVelocity, xAxis);
-		float currentZ = Vector3.Dot(relativeVelocity, zAxis);
+		Vector3 adjustment;
+		adjustment.x =
+			playerInput.x * speed - Vector3.Dot(relativeVelocity, xAxis);
+		adjustment.z =
+			playerInput.z * speed - Vector3.Dot(relativeVelocity, zAxis);
+		adjustment.y = Swimming ?	
+			playerInput.y * speed - Vector3.Dot(relativeVelocity, upAxis) : 0f;
 
-		float maxSpeedChange = acceleration * Time.deltaTime;
+		adjustment =
+			Vector3.ClampMagnitude(adjustment, acceleration * Time.deltaTime);
 
-		float newX =
-			Mathf.MoveTowards(currentX, playerInput.x * speed, maxSpeedChange);
-		float newZ =
-			Mathf.MoveTowards(currentZ, playerInput.y * speed, maxSpeedChange);
+		velocity += xAxis * adjustment.x + zAxis * adjustment.z;
 
-		velocity += xAxis * (newX - currentX) + zAxis * (newZ - currentZ);
+        if (Swimming)
+        {
+			velocity += upAxis * adjustment.y;
+        }
 	}
 
 	void Jump(Vector3 gravity)
@@ -338,6 +539,10 @@ public class PlayerController : MonoBehaviour
 		stepsSinceLastJump = 0;
 		jumpPhase += 1;
 		float jumpSpeed = Mathf.Sqrt(2f * gravity.magnitude * jumpHeight);
+        if (InWater)
+        {
+			jumpSpeed *= Mathf.Max(0f, 1f - submergence / swimThreshold);
+        }
 		jumpDirection = (jumpDirection + upAxis).normalized;
 		float alignedSpeed = Vector3.Dot(velocity, jumpDirection);
 		if (alignedSpeed > 0f)
@@ -359,6 +564,10 @@ public class PlayerController : MonoBehaviour
 
 	void EvaluateCollision(Collision collision)
 	{
+        if (Swimming)
+        {
+			return;
+        }
 		int layer = collision.gameObject.layer;
 		float minDot = GetMinDot(layer);
 		for (int i = 0; i < collision.contactCount; i++)

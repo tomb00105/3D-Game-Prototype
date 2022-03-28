@@ -3,10 +3,13 @@ using System.Collections.Generic;
 using UnityEngine;
 
 [RequireComponent(typeof(Rigidbody))]
-public class CustomGravityRigidbody : MonoBehaviour
+public class StableFloatingRigidbody : MonoBehaviour
 {
     [SerializeField]
     bool floatToSleep = false;
+
+    [SerializeField]
+    bool safeFloating = false;
 
     [SerializeField]
     float submergenceOffset = 0.5f;
@@ -18,7 +21,7 @@ public class CustomGravityRigidbody : MonoBehaviour
     float buoyancy = 1f;
 
     [SerializeField]
-    Vector3 buoyancyOffset = Vector3.zero;
+    Vector3[] buoyancyOffsets = default;
 
     [SerializeField, Range(0f, 10f)]
     float waterDrag = 1f;
@@ -32,12 +35,13 @@ public class CustomGravityRigidbody : MonoBehaviour
 
     float floatDelay;
 
-    float submergence;
+    float[] submergence;
 
     private void Awake()
     {
         rb = GetComponent<Rigidbody>();
         rb.useGravity = false;
+        submergence = new float[buoyancyOffsets.Length];
     }
 
     private void FixedUpdate()
@@ -65,19 +69,27 @@ public class CustomGravityRigidbody : MonoBehaviour
         }
 
         gravity = CustomGravity.GetGravity(rb.position);
-        if (submergence > 0f)
+        float dragFactor = waterDrag * Time.deltaTime / buoyancyOffsets.Length;
+        float buoyancyFactor = -buoyancy / buoyancyOffsets.Length;
+
+        for (int i = 0; i < buoyancyOffsets.Length; i++)
         {
-            float drag =
-                Mathf.Max(0f, 1f - waterDrag * submergence * Time.deltaTime);
-            rb.velocity *= drag;
-            rb.angularVelocity *= drag;
-            rb.AddForceAtPosition(
-                gravity * -(buoyancy * submergence),
-                transform.TransformPoint(buoyancyOffset),
-                ForceMode.Acceleration
-                );
-            submergence = 0f;
+            if (submergence[i] > 0f)
+            {
+                float drag =
+                    Mathf.Max(0f, 1f - dragFactor * submergence[i]);
+                rb.velocity *= drag;
+                rb.angularVelocity *= drag;
+                rb.AddForceAtPosition(
+                    gravity * (buoyancyFactor * submergence[i]),
+                    transform.TransformPoint(buoyancyOffsets[i]),
+                    ForceMode.Acceleration
+                    );
+                submergence[i] = 0f;
+            }
         }
+
+        
 
         rb.AddForce(gravity, ForceMode.Acceleration);
     }
@@ -103,18 +115,25 @@ public class CustomGravityRigidbody : MonoBehaviour
 
     void EvaluateSubmergence()
     {
-        Vector3 upAxis = -gravity.normalized;
-        if (Physics.Raycast(
-            rb.position + upAxis * submergenceOffset,
-            -upAxis, out RaycastHit hit, submergenceRange + 1f,
-            waterMask, QueryTriggerInteraction.Collide
-        ))
+        Vector3 down = gravity.normalized;
+        Vector3 offset = down * -submergenceOffset;
+        for (int i = 0; i < buoyancyOffsets.Length; i++)
         {
-            submergence = 1f - hit.distance / submergenceRange;
-        }
-        else
-        {
-            submergence = 1f;
+            Vector3 p = offset + transform.TransformPoint(buoyancyOffsets[i]);
+            if (Physics.Raycast(
+                p, down, out RaycastHit hit, submergenceRange + 1f,
+                waterMask, QueryTriggerInteraction.Collide
+                ))
+            {
+                submergence[i] = 1f - hit.distance / submergenceRange;
+            }
+            else if (
+                !safeFloating || Physics.CheckSphere(
+                    p, 0.01f, waterMask, QueryTriggerInteraction.Collide
+                ))
+            {
+                submergence[i] = 1f;
+            }
         }
     }
 }
