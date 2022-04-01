@@ -2,9 +2,11 @@ using UnityEngine;
 
 public class PlayerController : MonoBehaviour
 {
-
 	[SerializeField]
 	Transform playerInputSpace = default, ball = default;
+
+	[SerializeField]
+	LevelManager levelManager = default;
 
 	[SerializeField, Range(0f, 100f)]
 	float maxSpeed = 10f, maxClimbSpeed = 4f, maxSwimSpeed = 5f;
@@ -64,11 +66,21 @@ public class PlayerController : MonoBehaviour
 	[SerializeField, Min(0f)]
 	float ballAirRotation = 0.5f, ballSwimRotation = 2f;
 
+	[SerializeField]
+	AudioSource jumpAudio, landAudio;
+
+	[SerializeField]
+	ParticleSystem landingDust;
+
 	Rigidbody body, connectedBody, previousConnectedBody;
 
 	Vector3 playerInput;
 
 	Vector3 velocity, connectionVelocity;
+
+	public float averageVelocity = 0f;
+
+	float totalVelocity = 0f;
 
 	Vector3 connectionWorldPosition, connectionLocalPosition;
 
@@ -119,6 +131,11 @@ public class PlayerController : MonoBehaviour
 
 	void Update()
 	{
+        if (levelManager.IsPaused)
+        {
+			return;
+        }
+		
 		playerInput.x = Input.GetAxis("Horizontal");
 		playerInput.z = Input.GetAxis("Vertical");
 		playerInput.y = Swimming ? Input.GetAxis("UpDown") : 0f;
@@ -270,6 +287,7 @@ public class PlayerController : MonoBehaviour
 			velocity += gravity * Time.deltaTime;
 		}
 		body.velocity = velocity;
+		UpdateAverageVelocity();
 		ClearState();
 	}
 
@@ -511,6 +529,17 @@ public class PlayerController : MonoBehaviour
         }
 	}
 
+	void UpdateAverageVelocity()
+	{ 
+		totalVelocity += (Mathf.Abs(velocity.x) + Mathf.Abs(velocity.z));
+		float totalTimeElapsed = levelManager.timeToCompleteLevel - levelManager.timeRemaining;
+		if (totalTimeElapsed > 0)
+        {
+			averageVelocity = totalVelocity / totalTimeElapsed;
+		}
+		
+    }
+
 	void Jump(Vector3 gravity)
 	{
 		Vector3 jumpDirection;
@@ -550,19 +579,65 @@ public class PlayerController : MonoBehaviour
 			jumpSpeed = Mathf.Max(jumpSpeed - alignedSpeed, 0f);
 		}
 		velocity += jumpDirection * jumpSpeed;
+		jumpAudio.Play();
 	}
 
 	void OnCollisionEnter(Collision collision)
 	{
-		EvaluateCollision(collision);
+		EvaluateCollisionOnEnter(collision);
 	}
 
 	void OnCollisionStay(Collision collision)
 	{
-		EvaluateCollision(collision);
+		EvaluateCollisionOnStay(collision);
 	}
 
-	void EvaluateCollision(Collision collision)
+	void EvaluateCollisionOnEnter(Collision collision)
+	{
+		if (Swimming)
+		{
+			return;
+		}
+		landingDust.Play();
+		landAudio.Play();
+		int layer = collision.gameObject.layer;
+		float minDot = GetMinDot(layer);
+		for (int i = 0; i < collision.contactCount; i++)
+		{
+			Vector3 normal = collision.GetContact(i).normal;
+			float upDot = Vector3.Dot(upAxis, normal);
+			if (upDot >= minDot)
+			{
+				groundContactCount += 1;
+				contactNormal += normal;
+				connectedBody = collision.rigidbody;
+			}
+			else
+			{
+				if (upDot > -0.01f)
+				{
+					steepContactCount += 1;
+					steepNormal += normal;
+					if (groundContactCount == 0)
+					{
+						connectedBody = collision.rigidbody;
+					}
+				}
+				if (
+					desiresClimbing && upDot >= minClimbDotProduct &&
+					(climbMask & (1 << layer)) != 0
+				)
+				{
+					climbContactCount += 1;
+					climbNormal += normal;
+					lastClimbNormal = normal;
+					connectedBody = collision.rigidbody;
+				}
+			}
+		}
+	}
+
+	void EvaluateCollisionOnStay(Collision collision)
 	{
         if (Swimming)
         {

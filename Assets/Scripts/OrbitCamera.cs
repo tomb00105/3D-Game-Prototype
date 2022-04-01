@@ -35,9 +35,12 @@ public class OrbitCamera : MonoBehaviour
     [SerializeField]
     LayerMask obstructionMask = -1;
 
+    [SerializeField]
+    Vector2 orbitAngles = new Vector2(25f, 0f);
+
     Vector3 focusPoint, previousFocusPoint;
 
-    Vector2 orbitAngles = new Vector2(45f, 0f);
+    
 
     float lastManualRotationTime;
 
